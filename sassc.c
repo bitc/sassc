@@ -81,7 +81,70 @@ int compile_stdin(struct sass_options options, char* outfile) {
     return ret;
 }
 
-int compile_file(struct sass_options options, char* input_path, char* outfile) {
+int output_make_rule(char* import_dependencies, char* outfile, char* depsfile)
+{
+    char* c;
+    char* p;
+    FILE* fp;
+
+    /* If there are no dependencies then don't do anything */
+    if(*import_dependencies == '\0') {
+        return 0;
+    }
+
+    fp = fopen(depsfile, "w");
+    if(!fp) {
+        perror("Error opening dependency file");
+        return 1;
+    }
+
+    /* Replace all PATH_SEP characters with ' ' */
+    p = import_dependencies;
+    while(*p != '\0') {
+        if(*p == PATH_SEP) {
+            *p = ' ';
+        }
+        ++p;
+    }
+
+    /* Print a rule of the form:
+     *
+     * style.css : style.scss colors.scss _util.scss
+     */
+    if(fprintf(fp, "%s : %s\n", outfile, import_dependencies) < 0) {
+        goto write_error;
+    }
+
+    /* Print a special rule for each prerequisite of the form:
+     *
+     * style.scss :
+     * colors.scss :
+     * _util.scss :
+     *
+     * See: <http://make.paulandlesley.org/autodep.html#norule>
+     */
+
+    p = import_dependencies;
+    while(c = strchr(p, ' ')) {
+        if(fprintf(fp, "%.*s :\n", c - p, p) < 0) {
+            goto write_error;
+        }
+        p = c + 1;
+    }
+    if(fprintf(fp, "%s :\n", p) < 0) {
+        goto write_error;
+    }
+
+    fclose(fp);
+    return 0;
+
+write_error:
+    perror("Error writing to dependency file");
+    fclose(fp);
+    return 1;
+}
+
+int compile_file(struct sass_options options, char* input_path, char* outfile, char* depsfile) {
     int ret;
     struct sass_file_context* ctx = sass_new_file_context();
 
@@ -90,6 +153,10 @@ int compile_file(struct sass_options options, char* input_path, char* outfile) {
 
     sass_compile_file(ctx);
     ret = output(ctx->error_status, ctx->error_message, ctx->output_string, outfile);
+
+    if(ret == 0 && depsfile && ctx->import_dependencies) {
+        ret = output_make_rule(ctx->import_dependencies, outfile, depsfile);
+    }
 
     sass_free_file_context(ctx);
     return ret;
@@ -123,6 +190,7 @@ void print_usage(char* argv0) {
 
     printf("   -l             Emit comments showing original line numbers.\n");
     printf("   -I PATH        Set Sass import path.\n");
+    printf("   -M DEPS_FILE   Write a make rule for describing the import dependencies.\n");
     printf("   -h             Display this help message.\n");
     printf("\n");
 }
@@ -134,6 +202,7 @@ void invalid_usage(char* argv0) {
 
 int main(int argc, char** argv) {
     char *outfile = 0;
+    char *depsfile = 0;
     struct sass_options options;
     options.output_style = SASS_STYLE_NESTED;
     options.source_comments = 0;
@@ -141,7 +210,7 @@ int main(int argc, char** argv) {
     options.include_paths = "";
 
     int c, i;
-    while ((c = getopt(argc, argv, "ho:lt:I:")) != -1) {
+    while ((c = getopt(argc, argv, "ho:lt:I:M:")) != -1) {
         switch (c) {
         case 'o':
             outfile = optarg;
@@ -168,6 +237,9 @@ int main(int argc, char** argv) {
         case 'l':
             options.source_comments = 1;
             break;
+        case 'M':
+            depsfile = optarg;
+            break;
         case 'h':
             print_usage(argv[0]);
             return 0;
@@ -181,14 +253,23 @@ int main(int argc, char** argv) {
         }
     }
 
+    if(depsfile && !outfile) {
+        fprintf(stderr, "Error: When using the -M option you must also specify an output file with -o\n");
+        invalid_usage(argv[0]);
+    }
+
     if(optind < argc - 1) {
         fprintf(stderr, "Error: Too many arguments.\n");
         invalid_usage(argv[0]);
     }
 
     if(optind < argc && strcmp(argv[optind], "-") != 0) {
-        return compile_file(options, argv[optind], outfile);
+        return compile_file(options, argv[optind], outfile, depsfile);
     } else {
+        if (depsfile) {
+            fprintf(stderr, "Error: When using the -M option you must specify an input file\n");
+            invalid_usage(argv[0]);
+        }
         return compile_stdin(options, outfile);
     }
 }
